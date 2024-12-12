@@ -14,39 +14,47 @@ def process_data(file_content):
     rows = list(csv.reader(io.StringIO(data_str)))
 
     header = rows[0]
+
+    # Identify column indexes
     if "Agent name" in header:
         name_col = header.index("Agent name")
         total_touch_col = header.index("Total Touch")
         total_valid_touch_col = header.index("Total Valid Touch")
         done_col = header.index("Valid Done")
         vendor_share_col = header.index("Average vendor Share")
-        mistakes_percent_col = header.index("Mistakes Percent")
-        mistakes_value_col = header.index("Mistakes Value")
+        # New columns for mistakes
+        mistakes_percent_col = header.index("mistakes percent")
+        mistakes_value_col = header.index("mistakes value")
         start_data = 1
     else:
+        # If the CSV doesn't have headers or different headers, you must adjust accordingly.
+        # This block is just a fallback; ideally, always provide the correct headers.
         name_col = 0
         total_touch_col = 1
         total_valid_touch_col = 2
         done_col = 3
         vendor_share_col = 4
-        mistakes_percent_col = 5
-        mistakes_value_col = 6
+        mistakes_percent_col = 6  # Adjust if needed
+        mistakes_value_col = 7    # Adjust if needed
         start_data = 1
 
     agents = []
     pot = None
 
     for r in rows[start_data:]:
+        # Ensure we have all required columns
         if len(r) <= mistakes_value_col:
             continue
         name = r[name_col].strip()
         if name == "":
-            if len(r) > 7 and r[7].strip() != "":
+            # Try to parse pot value if present
+            if len(r) > 5 and r[5].strip() != "":
                 try:
-                    pot = float(r[7].strip())
+                    pot = float(r[5].strip())
                 except:
                     pass
             continue
+
         try:
             total_touch = float(r[total_touch_col])
             valid_touch = float(r[total_valid_touch_col])
@@ -84,6 +92,7 @@ def process_data(file_content):
         a["O"] = a["done"] / a["valid_touch"] if a["valid_touch"] != 0 else 0
         a["Score"] = a["X"]*2 + a["Y"]*3 + a["U"]*10 + a["J"]*7
 
+    # Ranking by "done"
     sorted_by_done = sorted(agents, key=lambda x: x["done"], reverse=True)
     for rank, agent_data in enumerate(sorted_by_done, start=1):
         agent_data["B"] = rank
@@ -95,32 +104,37 @@ def process_data(file_content):
     max_K = max(a["K"] for a in agents) if agents else 1
     max_O = max(a["O"] for a in agents) if agents else 1
 
+    # PreBonus calculation
     for a in agents:
         a["PreBonus"] = prebonus_from_score(a["Score"])
 
+    # Distribution
     denom = 0.0
     for a in agents:
         val = ((max_B - a["B"] + 1)**1.5
-              + (max_K - a["K"] + 1)**1.5
-              + (max_O - a["O"] + 1)**1.5)
+               + (max_K - a["K"] + 1)**1.5
+               + (max_O - a["O"] + 1)**1.5)
         denom += val
 
     for a in agents:
         numerator = ((max_B - a["B"] + 1)**1.5
-                    + (max_K - a["K"] + 1)**1.5
-                    + (max_O - a["O"] + 1)**1.5)
+                     + (max_K - a["K"] + 1)**1.5
+                     + (max_O - a["O"] + 1)**1.5)
         dist = 0
         if denom != 0:
             dist = pot * (numerator / denom)
         a["Distribution"] = dist
-        final_bonus = a["PreBonus"] + dist
 
-        # Apply mistakes deductions
-        mistakes_deduction = (a["mistakes_percent"] / 100) * final_bonus
-        final_bonus -= mistakes_deduction
-        final_bonus -= a["mistakes_value"]
+        # Calculate the initial final bonus before mistakes deduction
+        initial_final_bonus = a["PreBonus"] + a["Distribution"]
 
-        a["FinalBonus"] = final_bonus
+        # Deduct mistakes based on percentage
+        percentage_deduction = initial_final_bonus * (a["mistakes_percent"] / 100)
+
+        # Deduct mistakes value
+        value_deduction = a["mistakes_value"]
+
+        a["FinalBonus"] = initial_final_bonus - percentage_deduction - value_deduction
 
     # Updated column headers
     output = io.StringIO()
@@ -137,8 +151,8 @@ def process_data(file_content):
         "Score",
         "PreBonus",
         "Distribution",
-        "Mistakes Percent",     # Mistakes Percent
-        "Mistakes Value",       # Mistakes Value
+        "Mistakes Percent",
+        "Mistakes Value",
         "FinalBonus"
     ])
     for a in agents:
