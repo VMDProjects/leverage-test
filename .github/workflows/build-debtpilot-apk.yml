@@ -84,6 +84,16 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs DebtPilot-Offline-v1.1.apk
           sha256sum DebtPilot-Offline-v1.1.apk | tee DebtPilot-Offline-v1.1.sha256
 
+      - name: Upload final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DebtPilot-Offline-v1.1-APK
+          path: |
+            DebtPilot-Offline-v1.1.apk
+            DebtPilot-Offline-v1.1.sha256
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Emulator install and launch smoke test
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
@@ -99,12 +109,3 @@ jobs:
             adb shell pidof com.debtpilot.offline
             adb shell dumpsys activity activities | grep -q "com.debtpilot.offline/.MainActivity"
 
-      - name: Upload final APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: DebtPilot-Offline-v1.1-APK
-          path: |
-            DebtPilot-Offline-v1.1.apk
-            DebtPilot-Offline-v1.1.sha256
-          if-no-files-found: error
-          retention-days: 30
