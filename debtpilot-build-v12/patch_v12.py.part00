@@ -1,0 +1,93 @@
+from pathlib import Path
+import re
+root=Path('/mnt/data/debtpilot_v12/DebtPilotOffline')
+
+# Models
+p=root/'app/src/main/java/com/debtpilot/offline/core/Models.kt'
+s=p.read_text()
+s=s.replace('''    val status: LoanStatus = LoanStatus.ACTIVE,\n    val notes: String = ""\n)''','''    val status: LoanStatus = LoanStatus.ACTIVE,\n    val notes: String = "",\n    val reminderHour: Int = 9,\n    val reminderMinute: Int = 0,\n    val alarmSoundUri: String = "",\n    val fullScreenAlarm: Boolean = true,\n    val vibrateAlarm: Boolean = true\n)''')
+p.write_text(s)
+
+# DB migration/model mapping
+p=root/'app/src/main/java/com/debtpilot/offline/data/DebtDatabase.kt'
+s=p.read_text()
+s=s.replace("notes TEXT NOT NULL DEFAULT '',\n                created_at", "notes TEXT NOT NULL DEFAULT '',\n                reminder_hour INTEGER NOT NULL DEFAULT 9,\n                reminder_minute INTEGER NOT NULL DEFAULT 0,\n                alarm_sound_uri TEXT NOT NULL DEFAULT '',\n                fullscreen_alarm INTEGER NOT NULL DEFAULT 1,\n                vibrate_alarm INTEGER NOT NULL DEFAULT 1,\n                created_at")
+s=s.replace('''    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {\n        // v1 schema. Future versions should migrate, never silently destroy financial history.\n    }''','''    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {\n        if (oldVersion < 2) {\n            db.execSQL("ALTER TABLE loans ADD COLUMN reminder_hour INTEGER NOT NULL DEFAULT 9")\n            db.execSQL("ALTER TABLE loans ADD COLUMN reminder_minute INTEGER NOT NULL DEFAULT 0")\n            db.execSQL("ALTER TABLE loans ADD COLUMN alarm_sound_uri TEXT NOT NULL DEFAULT ''")\n            db.execSQL("ALTER TABLE loans ADD COLUMN fullscreen_alarm INTEGER NOT NULL DEFAULT 1")\n            db.execSQL("ALTER TABLE loans ADD COLUMN vibrate_alarm INTEGER NOT NULL DEFAULT 1")\n        }\n    }''')
+s=s.replace('''                    status = LoanStatus.valueOf(c.getString(c.getColumnIndexOrThrow("status"))),\n                    notes = c.getString(c.getColumnIndexOrThrow("notes"))''','''                    status = LoanStatus.valueOf(c.getString(c.getColumnIndexOrThrow("status"))),\n                    notes = c.getString(c.getColumnIndexOrThrow("notes")),\n                    reminderHour = c.getInt(c.getColumnIndexOrThrow("reminder_hour")),\n                    reminderMinute = c.getInt(c.getColumnIndexOrThrow("reminder_minute")),\n                    alarmSoundUri = c.getString(c.getColumnIndexOrThrow("alarm_sound_uri")),\n                    fullScreenAlarm = c.getInt(c.getColumnIndexOrThrow("fullscreen_alarm")) != 0,\n                    vibrateAlarm = c.getInt(c.getColumnIndexOrThrow("vibrate_alarm")) != 0''')
+s=s.replace('''            put("status", loan.status.name)\n            put("notes", loan.notes)''','''            put("status", loan.status.name)\n            put("notes", loan.notes)\n            put("reminder_hour", loan.reminderHour.coerceIn(0, 23))\n            put("reminder_minute", loan.reminderMinute.coerceIn(0, 59))\n            put("alarm_sound_uri", loan.alarmSoundUri)\n            put("fullscreen_alarm", if (loan.fullScreenAlarm) 1 else 0)\n            put("vibrate_alarm", if (loan.vibrateAlarm) 1 else 0)''')
+s=s.replace('root.put("schemaVersion", 1)', 'root.put("schemaVersion", 2)')
+s=s.replace('require(root.optInt("schemaVersion", 1) == 1) { "Unsupported backup version" }', 'require(root.optInt("schemaVersion", 1) in 1..2) { "Unsupported backup version" }')
+s=s.replace('''                    status = LoanStatus.valueOf(o.optString("status", LoanStatus.ACTIVE.name)),\n                    notes = o.optString("notes", "")''','''                    status = LoanStatus.valueOf(o.optString("status", LoanStatus.ACTIVE.name)),\n                    notes = o.optString("notes", ""),\n                    reminderHour = o.optInt("reminderHour", 9),\n                    reminderMinute = o.optInt("reminderMinute", 0),\n                    alarmSoundUri = o.optString("alarmSoundUri", ""),\n                    fullScreenAlarm = o.optBoolean("fullScreenAlarm", true),\n                    vibrateAlarm = o.optBoolean("vibrateAlarm", true)''')
+s=s.replace('''        put("status", loan.status.name)\n        put("notes", loan.notes)''','''        put("status", loan.status.name)\n        put("notes", loan.notes)\n        put("reminderHour", loan.reminderHour)\n        put("reminderMinute", loan.reminderMinute)\n        put("alarmSoundUri", loan.alarmSoundUri)\n        put("fullScreenAlarm", loan.fullScreenAlarm)\n        put("vibrateAlarm", loan.vibrateAlarm)''')
+s=s.replace('private const val DB_VERSION = 1','private const val DB_VERSION = 2')
+p.write_text(s)
+
+# ReminderScheduler completely replace
+p=root/'app/src/main/java/com/debtpilot/offline/reminder/ReminderScheduler.kt'
+p.write_text(r'''package com.debtpilot.offline.reminder
+
+import android.app.AlarmManager
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
+import com.debtpilot.offline.core.JalaliDate
+import com.debtpilot.offline.core.Loan
+import com.debtpilot.offline.core.LoanStatus
+import com.debtpilot.offline.core.ReminderPlanner
+import java.time.LocalTime
+import java.time.ZoneId
+
+class ReminderScheduler(private val context: Context) {
+    private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    fun schedule(loan: Loan) {
+        cancel(loan.id)
+        if (loan.status != LoanStatus.ACTIVE) return
+        scheduleOccurrence(loan, loan.nextDueDate)
+    }
+
+    fun scheduleOccurrence(loan: Loan, occurrenceDue: JalaliDate) {
+        if (loan.status != LoanStatus.ACTIVE) return
+        val hour = loan.reminderHour.coerceIn(0, 23)
+        val minute = loan.reminderMinute.coerceIn(0, 59)
+        val offsets = reminderOffsets()
+        val now = System.currentTimeMillis()
+
+        offsets.forEach { daysBefore ->
+            val alertDate = ReminderPlanner.alertDate(occurrenceDue, loan.reminderDayOfMonth, loan.repeatMode, daysBefore)
+            var trigger = alertDate.toGregorian().atTime(LocalTime.of(hour, minute))
+                .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            if (trigger <= now && daysBefore != 0) return@forEach
+            if (trigger <= now) trigger = now + 5_000
+            setAlarm(trigger, pendingIntent(loan, occurrenceDue, daysBefore))
+        }
+        prefs.edit().putLong("lastAlarmScheduleEpoch", System.currentTimeMillis()).apply()
+    }
+
+    fun scheduleAll(loans: List<Loan>) = loans.forEach(::schedule)
+
+    fun cancel(loanId: Long) {
+        ALL_OFFSETS.forEach { offset -> alarmManager.cancel(pendingIntentForCancel(loanId, offset)) }
+    }
+
+    fun snooze(loanId: Long, code: String, name: String, balance: Double, due: String, soundUri: String, vibrate: Boolean, minutes: Int = 10) {
+        val trigger = System.currentTimeMillis() + minutes.coerceAtLeast(1) * 60_000L
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("loanId", loanId); putExtra("code", code); putExtra("name", name)
+            putExtra("balance", balance); putExtra("due", due); putExtra("offsetDays", 0)
+            putExtra("soundUri", soundUri); putExtra("fullScreen", true); putExtra("vibrate", vibrate)
+            putExtra("snoozed", true)
+        }
+        val pi = PendingIntent.getBroadcast(context, snoozeRequestCode(loanId), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        setAlarm(trigger, pi)
+    }
+
+    fun scheduleTestAlarm(seconds: Int = 10) {
+        val trigger = System.currentTimeMillis() + seconds.co
