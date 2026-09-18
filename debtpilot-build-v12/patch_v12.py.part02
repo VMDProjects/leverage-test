@@ -1,0 +1,128 @@
+.VISIBILITY_PUBLIC).setContentIntent(openApp)
+            .setAutoCancel(offsetDays > 0).setOngoing(fullScreen && offsetDays == 0)
+        if (fullScreen && offsetDays == 0) builder.setFullScreenIntent(fullScreenPending, true)
+
+        try { NotificationManagerCompat.from(context).notify(if (isTest) TEST_NOTIFICATION_ID else requestNotificationId(id, offsetDays), builder.build()) } catch (_: SecurityException) {}
+
+        if (!isTest && offsetDays == 0 && id > 0 && due.isNotBlank()) {
+            val pending = goAsync()
+            thread(name = "DebtPilotAlarmRollForward") {
+                try {
+                    val db = DebtDatabase(context.applicationContext)
+                    val current = db.getLoan(id)
+                    if (current != null && current.status == LoanStatus.ACTIVE && current.repeatMode != RepeatMode.NONE) {
+                        val firedDue = runCatching { JalaliDate.parse(due) }.getOrNull()
+                        if (firedDue != null) {
+                            val nextDue = if (current.nextDueDate > firedDue) current.nextDueDate else ReminderPlanner.nextFutureDue(firedDue, current.repeatMode, JalaliDate.today())
+                            ReminderScheduler(context.applicationContext).scheduleOccurrence(current, nextDue)
+                        }
+                    }
+                    db.close()
+                } finally { pending.finish() }
+            }
+        }
+    }
+
+    private fun createChannel(context: Context, loanId: Long, soundUri: String, vibrate: Boolean): String {
+        val normalized = soundUri.ifBlank { ReminderScheduler.defaultAlarmUri().toString() }
+        val channelId = "loan_alarm_${loanId}_${abs(normalized.hashCode())}_${if (vibrate) 1 else 0}"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            if (manager.getNotificationChannel(channelId) == null) {
+                val attrs = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+                val channel = NotificationChannel(channelId, "Debt alarm ${if (loanId > 0) loanId else "test"}", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Payment alarm for a DebtPilot loan"
+                    setSound(Uri.parse(normalized), attrs); enableVibration(vibrate)
+                    if (vibrate) vibrationPattern = longArrayOf(0, 450, 200, 450, 200, 700)
+                    setShowBadge(true); lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
+        return channelId
+    }
+
+    private fun requestNotificationId(loanId: Long, offset: Int): Int = (((loanId % 200_000_000L) * 10L + offset.coerceIn(0, 9)) % Int.MAX_VALUE).toInt()
+    private fun formatMoney(v: Double): String = "%,.0f".format(v)
+    companion object { private const val TEST_NOTIFICATION_ID = 2_146_000_001 }
+}
+''')
+
+# AlarmActivity
+p=root/'app/src/main/java/com/debtpilot/offline/AlarmActivity.kt'
+p.write_text(r'''package com.debtpilot.offline
+
+import android.app.NotificationManager
+import android.content.Intent
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
+import com.debtpilot.offline.data.DebtDatabase
+import com.debtpilot.offline.reminder.ReminderScheduler
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class AlarmActivity : ComponentActivity() {
+    private var player: MediaPlayer? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) { setShowWhenLocked(true); setTurnScreenOn(true) }
+        else window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        render()
+    }
+
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); stopSound(); render() }
+    override fun onStart() { super.onStart(); startSound() }
+    override fun onStop() { stopSound(); super.onStop() }
+
+    private fun render() {
+        val loanId=intent.getLongExtra("loanId",0L); val code=intent.getStringExtra("code").orEmpty(); val name=intent.getStringExtra("name") ?: "Payment reminder"
+        val due=intent.getStringExtra("due").orEmpty(); val balance=intent.getDoubleExtra("balance",0.0); val sound=intent.getStringExtra("soundUri").orEmpty()
+        val vibrate=intent.getBooleanExtra("vibrate",true); val scheduled=intent.getDoubleExtra("scheduledAmount",0.0); val isTest=intent.getBooleanExtra("isTest",false)
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Surface(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize().padding(28.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                        Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                            Text(if (isTest) "Alarm test" else "Payment due", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            Text(name, style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
+                            if (code.isNotBlank()) Text(code, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            HorizontalDivider()
+                            Text("${"%,.0f".format(balance)} تومان", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                            Text("Due: $due شمسی", style = MaterialTheme.typography.titleLarge)
+                            if (scheduled > 0) Text("Scheduled payment: ${"%,.0f".format(scheduled)} تومان")
+                            Text("DebtPilot is reminding you at the exact time you selected.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = { ReminderScheduler(applicationContext).snooze(loanId,code,name,balance,due,sound,vibrate,10); finishAlarm(loanId) }, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Snooze 10 minutes") }
+                            if (!isTest && scheduled > 0 && loanId > 0) OutlinedButton(onClick = { markPaid(loanId) }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Mark scheduled payment paid") }
+                            OutlinedButton(onClick = { startActivity(Intent(this@AlarmActivity, MainActivity::class.java)); finishAlarm(loanId) }, modifier = Modifier.fillMaxWidth()) { Text("Open DebtPilot") }
+                            TextButton(onClick = { finishAlarm(loanId) }, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("Dismiss") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun markPaid(loanId: Long) {
+        lifecycleScope.launch {
+            val updated = withContext(Dispatchers.IO) { DebtDatabase(applicationContext).use { it.markCurrentPaymentPaid(loanId) } }
+            if (updated != null) ReminderScheduler(applicationContext).schedule(updated)
+           
