@@ -23,23 +23,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android 35 SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Prepare Android SDK 35
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
 
-      - name: Unpack DebtPilot source
+      - name: Unpack and verify DebtPilot source
         run: |
           rm -rf build-src
           mkdir build-src
           cat debtpilot-build/DebtPilotOffline.zip.b64.part* > DebtPilotOffline.zip.b64
           base64 -d DebtPilotOffline.zip.b64 > DebtPilotOffline.zip
+          echo "43f28194bf1bb06f07f994d722a9b8311e02200d9d7ab02849d9df0235fe6357  DebtPilotOffline.zip" | sha256sum -c -
           unzip -q DebtPilotOffline.zip -d build-src
           test -f build-src/DebtPilotOffline/settings.gradle.kts
 
@@ -53,6 +54,12 @@ jobs:
 
       - name: Rename APK
         run: cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.0.apk
+
+      - name: Verify APK package
+        run: |
+          test -s DebtPilot-Offline-v1.0.apk
+          unzip -t DebtPilot-Offline-v1.0.apk >/dev/null
+          sha256sum DebtPilot-Offline-v1.0.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
