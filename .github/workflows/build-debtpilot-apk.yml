@@ -1,15 +1,19 @@
-name: Build DebtPilot APK
+name: Build DebtPilot APK v1.1
 
 on:
+  push:
+    branches:
+      - debtpilot-apk-build
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+
     steps:
       - name: Checkout build branch
         uses: actions/checkout@v4
@@ -20,7 +24,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Prepare Android SDK 35
+      - name: Prepare Android SDK
         run: |
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
           echo "Using sdkmanager: $SDKMANAGER"
@@ -34,38 +38,72 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Unpack and verify DebtPilot source
+      - name: Reconstruct and verify v1.1 source
         run: |
-          rm -rf build-src
+          rm -rf build-src DebtPilotOffline-v1.1-source.zip DebtPilotOffline-v1.1-source.zip.b64
           mkdir build-src
-          cat debtpilot-build/DebtPilotOffline.zip.b64.part* > DebtPilotOffline.zip.b64
-          base64 -d DebtPilotOffline.zip.b64 > DebtPilotOffline.zip
-          echo "43f28194bf1bb06f07f994d722a9b8311e02200d9d7ab02849d9df0235fe6357  DebtPilotOffline.zip" | sha256sum -c -
-          unzip -q DebtPilotOffline.zip -d build-src
+          cat debtpilot-build-v11/source.b64.* > DebtPilotOffline-v1.1-source.zip.b64
+          base64 -d DebtPilotOffline-v1.1-source.zip.b64 > DebtPilotOffline-v1.1-source.zip
+          echo "326c02a31978c6b49be95d51ee6843527ab670ddaa0e6c781e8104785efdef2e  DebtPilotOffline-v1.1-source.zip" | sha256sum -c -
+          unzip -q DebtPilotOffline-v1.1-source.zip -d build-src
           test -f build-src/DebtPilotOffline/settings.gradle.kts
 
-      - name: Run unit tests
+      - name: Privacy gate
+        run: |
+          ! grep -R 'android.permission.INTERNET' build-src/DebtPilotOffline/app/src/main/AndroidManifest.xml
+
+      - name: Run unit and persistence tests
         working-directory: build-src/DebtPilotOffline
         run: gradle --no-daemon testDebugUnitTest
 
-      - name: Build installable debug APK
+      - name: Run Android lint
+        working-directory: build-src/DebtPilotOffline
+        run: gradle --no-daemon lintDebug
+
+      - name: Build APK
         working-directory: build-src/DebtPilotOffline
         run: gradle --no-daemon assembleDebug
 
-      - name: Rename APK
-        run: cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.0.apk
-
-      - name: Verify APK package and Android signature
+      - name: Prepare final APK
         run: |
-          test -s DebtPilot-Offline-v1.0.apk
-          unzip -t DebtPilot-Offline-v1.0.apk >/dev/null
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs DebtPilot-Offline-v1.0.apk
-          sha256sum DebtPilot-Offline-v1.0.apk
+          cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.1.apk
+          test -s DebtPilot-Offline-v1.1.apk
+          unzip -t DebtPilot-Offline-v1.1.apk >/dev/null
 
-      - name: Upload APK artifact
+      - name: Verify package, privacy, and Android signature
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$AAPT" dump badging DebtPilot-Offline-v1.1.apk | tee apk-badging.txt
+          grep -q "package: name='com.debtpilot.offline'" apk-badging.txt
+          grep -q "versionCode='2'" apk-badging.txt
+          grep -q "versionName='1.1.0'" apk-badging.txt
+          "$AAPT" dump permissions DebtPilot-Offline-v1.1.apk | tee apk-permissions.txt
+          ! grep -q "android.permission.INTERNET" apk-permissions.txt
+          "$APKSIGNER" verify --verbose --print-certs DebtPilot-Offline-v1.1.apk
+          sha256sum DebtPilot-Offline-v1.1.apk | tee DebtPilot-Offline-v1.1.sha256
+
+      - name: Emulator install and launch smoke test
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            adb install -r "$GITHUB_WORKSPACE/DebtPilot-Offline-v1.1.apk"
+            adb shell am force-stop com.debtpilot.offline
+            adb shell am start -W -n com.debtpilot.offline/.MainActivity
+            sleep 3
+            adb shell pidof com.debtpilot.offline
+            adb shell dumpsys activity activities | grep -q "com.debtpilot.offline/.MainActivity"
+
+      - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
-          name: DebtPilot-Offline-v1.0-APK
-          path: DebtPilot-Offline-v1.0.apk
+          name: DebtPilot-Offline-v1.1-APK
+          path: |
+            DebtPilot-Offline-v1.1.apk
+            DebtPilot-Offline-v1.1.sha256
           if-no-files-found: error
           retention-days: 30
