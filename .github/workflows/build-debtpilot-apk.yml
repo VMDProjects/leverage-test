@@ -42,7 +42,7 @@ jobs:
         run: |
           rm -rf build-src DebtPilotOffline-v1.1-source.zip DebtPilotOffline-v1.1-source.zip.b64
           mkdir build-src
-          cat debtpilot-build-v11/source.b64.* > DebtPilotOffline-v1.1-source.zip.b64
+          cat debtpilot-build-v11/source.b64.00 debtpilot-build-v11/source.b64.01 debtpilot-build-v11/source.b64.02a debtpilot-build-v11/source.b64.02b debtpilot-build-v11/source.b64.02c debtpilot-build-v11/source.b64.03 debtpilot-build-v11/source.b64.04 debtpilot-build-v11/source.b64.05 debtpilot-build-v11/source.b64.06 > DebtPilotOffline-v1.1-source.zip.b64
           base64 -d DebtPilotOffline-v1.1-source.zip.b64 > DebtPilotOffline-v1.1-source.zip
           echo "326c02a31978c6b49be95d51ee6843527ab670ddaa0e6c781e8104785efdef2e  DebtPilotOffline-v1.1-source.zip" | sha256sum -c -
           unzip -q DebtPilotOffline-v1.1-source.zip -d build-src
