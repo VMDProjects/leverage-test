@@ -47,6 +47,7 @@ jobs:
           echo "326c02a31978c6b49be95d51ee6843527ab670ddaa0e6c781e8104785efdef2e  DebtPilotOffline-v1.1-source.zip" | sha256sum -c -
           unzip -q DebtPilotOffline-v1.1-source.zip -d build-src
           test -f build-src/DebtPilotOffline/settings.gradle.kts
+          cp debtpilot-build-v11/themes.xml build-src/DebtPilotOffline/app/src/main/res/values/themes.xml
 
       - name: Privacy gate
         run: |
