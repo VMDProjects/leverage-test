@@ -58,10 +58,11 @@ jobs:
       - name: Rename APK
         run: cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.0.apk
 
-      - name: Verify APK package
+      - name: Verify APK package and Android signature
         run: |
           test -s DebtPilot-Offline-v1.0.apk
           unzip -t DebtPilot-Offline-v1.0.apk >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs DebtPilot-Offline-v1.0.apk
           sha256sum DebtPilot-Offline-v1.0.apk
 
       - name: Upload APK artifact
