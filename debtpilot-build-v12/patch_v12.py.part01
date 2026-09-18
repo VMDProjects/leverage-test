@@ -1,0 +1,125 @@
+erceAtLeast(1) * 1_000L
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("isTest", true); putExtra("loanId", TEST_LOAN_ID); putExtra("name", "DebtPilot test alarm")
+            putExtra("code", "TEST"); putExtra("due", JalaliDate.today().format()); putExtra("balance", 0.0)
+            putExtra("offsetDays", 0); putExtra("soundUri", defaultAlarmUri().toString()); putExtra("fullScreen", true); putExtra("vibrate", true)
+        }
+        val pi = PendingIntent.getBroadcast(context, TEST_REQUEST_CODE, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        setAlarm(trigger, pi)
+    }
+
+    fun sendTestNotificationNow() {
+        context.sendBroadcast(Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("isTest", true); putExtra("loanId", TEST_LOAN_ID); putExtra("name", "DebtPilot test notification")
+            putExtra("code", "TEST"); putExtra("due", JalaliDate.today().format()); putExtra("balance", 0.0)
+            putExtra("offsetDays", 0); putExtra("soundUri", defaultAlarmUri().toString()); putExtra("fullScreen", false); putExtra("vibrate", true)
+        })
+    }
+
+    fun canScheduleExact(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
+    fun notificationsAllowed(): Boolean = NotificationManagerCompat.from(context).areNotificationsEnabled()
+    fun canUseFullScreenIntents(): Boolean = Build.VERSION.SDK_INT < 34 || context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+    fun lastScheduleEpoch(): Long = prefs.getLong("lastAlarmScheduleEpoch", 0L)
+
+    fun exactAlarmSettingsIntent(): Intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply { data = Uri.parse("package:${context.packageName}") }
+    fun fullScreenSettingsIntent(): Intent = if (Build.VERSION.SDK_INT >= 34) Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply { data = Uri.parse("package:${context.packageName}") } else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply { data = Uri.parse("package:${context.packageName}") }
+
+    private fun reminderOffsets(): Set<Int> = buildSet {
+        add(0)
+        if (prefs.getBoolean("remind1DayBefore", true)) add(1)
+        if (prefs.getBoolean("remind3DaysBefore", false)) add(3)
+    }
+
+    private fun setAlarm(trigger: Long, pi: PendingIntent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi)
+        else alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi)
+    }
+
+    private fun requestCode(loanId: Long, offsetDays: Int): Int = ((loanId % 200_000_000L) * 10L + when (offsetDays) { 0 -> 0; 1 -> 1; 3 -> 3; else -> 9 }).toInt()
+    private fun snoozeRequestCode(loanId: Long): Int = (((loanId % 200_000_000L) * 10L + 8L) % Int.MAX_VALUE).toInt()
+
+    private fun pendingIntent(loan: Loan, occurrenceDue: JalaliDate, offsetDays: Int): PendingIntent {
+        val sound = loan.alarmSoundUri.ifBlank { defaultAlarmUri().toString() }
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("loanId", loan.id); putExtra("code", loan.code); putExtra("name", loan.name); putExtra("balance", loan.remainingBalance)
+            putExtra("due", occurrenceDue.format()); putExtra("offsetDays", offsetDays); putExtra("soundUri", sound)
+            putExtra("fullScreen", loan.fullScreenAlarm && offsetDays == 0); putExtra("vibrate", loan.vibrateAlarm)
+            putExtra("scheduledAmount", when { loan.installmentAmount > 0 -> loan.installmentAmount; loan.minimumPayment > 0 -> loan.minimumPayment; else -> 0.0 })
+        }
+        return PendingIntent.getBroadcast(context, requestCode(loan.id, offsetDays), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    private fun pendingIntentForCancel(loanId: Long, offsetDays: Int): PendingIntent {
+        val intent = Intent(context, AlarmReceiver::class.java)
+        return PendingIntent.getBroadcast(context, requestCode(loanId, offsetDays), intent, PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
+            ?: PendingIntent.getBroadcast(context, requestCode(loanId, offsetDays), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    companion object {
+        private val ALL_OFFSETS = listOf(0, 1, 3)
+        private const val TEST_LOAN_ID = -9999L
+        private const val TEST_REQUEST_CODE = 2_147_000_001
+        fun defaultAlarmUri(): Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+    }
+}
+''')
+
+# AlarmReceiver replace
+p=root/'app/src/main/java/com/debtpilot/offline/reminder/AlarmReceiver.kt'
+p.write_text(r'''package com.debtpilot.offline.reminder
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.media.AudioAttributes
+import android.net.Uri
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import com.debtpilot.offline.AlarmActivity
+import com.debtpilot.offline.MainActivity
+import com.debtpilot.offline.core.JalaliDate
+import com.debtpilot.offline.core.LoanStatus
+import com.debtpilot.offline.core.ReminderPlanner
+import com.debtpilot.offline.core.RepeatMode
+import com.debtpilot.offline.data.DebtDatabase
+import kotlin.concurrent.thread
+import kotlin.math.abs
+
+class AlarmReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val id = intent.getLongExtra("loanId", 0L)
+        val code = intent.getStringExtra("code").orEmpty()
+        val name = intent.getStringExtra("name").orEmpty()
+        val balance = intent.getDoubleExtra("balance", 0.0)
+        val due = intent.getStringExtra("due").orEmpty()
+        val offsetDays = intent.getIntExtra("offsetDays", 0)
+        val soundUri = intent.getStringExtra("soundUri").orEmpty()
+        val fullScreen = intent.getBooleanExtra("fullScreen", false)
+        val vibrate = intent.getBooleanExtra("vibrate", true)
+        val scheduledAmount = intent.getDoubleExtra("scheduledAmount", 0.0)
+        val isTest = intent.getBooleanExtra("isTest", false)
+
+        val channelId = createChannel(context, id, soundUri, vibrate)
+        val openApp = PendingIntent.getActivity(context, ((id % Int.MAX_VALUE) + 77).toInt(), Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val alarmIntent = Intent(context, AlarmActivity::class.java).apply {
+            putExtras(intent.extras ?: android.os.Bundle())
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val fullScreenPending = PendingIntent.getActivity(context, ((id % Int.MAX_VALUE) + 177).toInt(), alarmIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val title = when {
+            isTest -> "DebtPilot alarm test"
+            offsetDays > 0 -> "$name payment in $offsetDays day${if (offsetDays == 1) "" else "s"}"
+            else -> "$name payment is due"
+        }
+        val body = if (isTest) "Full alarm path is working." else "$code · Due $due شمسی · Remaining ${formatMoney(balance)} تومان"
+        val builder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle(title).setContentText(body).setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_MAX).setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat
