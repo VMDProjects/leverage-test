@@ -1,9 +1,6 @@
 name: Build DebtPilot APK
 
 on:
-  push:
-    branches:
-      - debtpilot-apk-build
   workflow_dispatch:
 
 permissions:
