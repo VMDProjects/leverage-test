@@ -1,4 +1,4 @@
-name: Build DebtPilot APK v1.1
+name: Build DebtPilot APK v1.2
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-and-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
 
     steps:
       - name: Checkout build branch
@@ -27,7 +27,6 @@ jobs:
       - name: Prepare Android SDK
         run: |
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
-          echo "Using sdkmanager: $SDKMANAGER"
           test -n "$SDKMANAGER"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
@@ -38,7 +37,7 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Reconstruct and verify v1.1 source
+      - name: Reconstruct verified v1.1 base
         run: |
           rm -rf build-src DebtPilotOffline-v1.1-source.zip DebtPilotOffline-v1.1-source.zip.b64
           mkdir build-src
@@ -49,9 +48,36 @@ jobs:
           test -f build-src/DebtPilotOffline/settings.gradle.kts
           cp debtpilot-build-v11/themes.xml build-src/DebtPilotOffline/app/src/main/res/values/themes.xml
 
-      - name: Privacy gate
+      - name: Reconstruct and verify v1.2 patches
         run: |
-          ! grep -R 'android.permission.INTERNET' build-src/DebtPilotOffline/app/src/main/AndroidManifest.xml
+          cat debtpilot-build-v12/patch_v12.py.part* > /tmp/patch_v12.py
+          cat debtpilot-build-v12/patch_ui_v12.py.part* > /tmp/patch_ui_v12.py
+          echo "e298ba65faa5dc0d4a4281766808fbf98449d9dac3628796bacb0be065d19188  /tmp/patch_v12.py" | sha256sum -c -
+          echo "ebffd634332e953f0e02721241d24726eebc1deb4c8e598140070ece32c1e6cf  /tmp/patch_ui_v12.py" | sha256sum -c -
+          sed -i 's#/mnt/data/debtpilot_v12/DebtPilotOffline#build-src/DebtPilotOffline#g' /tmp/patch_v12.py /tmp/patch_ui_v12.py
+          python /tmp/patch_v12.py
+          python /tmp/patch_ui_v12.py
+
+      - name: Verify v1.2 patched source
+        working-directory: build-src/DebtPilotOffline
+        run: |
+          echo "3fccde93ba717af42f8cf8e1e724c7899bc858c4590f62e29cfa72f8c8fa2af9  app/build.gradle.kts" | sha256sum -c -
+          echo "844b30ac6c03837c9d22c09d6a64630d3031e260c67192b7eccef08d36fcf9ad  app/src/main/AndroidManifest.xml" | sha256sum -c -
+          echo "6b269e5a26909b2b6d36909acdb05903a66b48a055093b7999c67d17757f9747  app/src/main/java/com/debtpilot/offline/core/Models.kt" | sha256sum -c -
+          echo "6ff94acfe5e0658e9fac43b7e90cb9e6c60ed5a843226e7903b31e4ce0e8c2f4  app/src/main/java/com/debtpilot/offline/data/DebtDatabase.kt" | sha256sum -c -
+          echo "4e51f05be41e8ef23794551c733348969b1eb6057804397c3478a8e056efdbb3  app/src/main/java/com/debtpilot/offline/reminder/ReminderScheduler.kt" | sha256sum -c -
+          echo "b2057262d331d6dee411cbb42f45ae6807b8fcd0bf84d0d07e435ba884cafacf  app/src/main/java/com/debtpilot/offline/reminder/AlarmReceiver.kt" | sha256sum -c -
+          echo "8f840351d1a466eafeaf99423b4b02c658610c038d5f2fb00a096b61b4228609  app/src/main/java/com/debtpilot/offline/AlarmActivity.kt" | sha256sum -c -
+          echo "f01390ae5d0202c35265f43608103cd405268be79e365ca0b4773f2dc8747aee  app/src/main/java/com/debtpilot/offline/ui/DebtPilotApp.kt" | sha256sum -c -
+          echo "ed13019046330ca11d222fcddead93ebcbfc2f948797ba89033ae54b9bf7b20f  app/src/test/java/com/debtpilot/offline/data/DebtDatabaseTest.kt" | sha256sum -c -
+
+      - name: Privacy and alarm permission gate
+        run: |
+          MANIFEST=build-src/DebtPilotOffline/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.INTERNET' "$MANIFEST"
+          grep -q 'android.permission.USE_FULL_SCREEN_INTENT' "$MANIFEST"
+          grep -q 'android.permission.SCHEDULE_EXACT_ALARM' "$MANIFEST"
+          grep -q 'android.permission.POST_NOTIFICATIONS' "$MANIFEST"
 
       - name: Run unit and persistence tests
         working-directory: build-src/DebtPilotOffline
@@ -67,30 +93,31 @@ jobs:
 
       - name: Prepare final APK
         run: |
-          cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.1.apk
-          test -s DebtPilot-Offline-v1.1.apk
-          unzip -t DebtPilot-Offline-v1.1.apk >/dev/null
+          cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.2.apk
+          test -s DebtPilot-Offline-v1.2.apk
+          unzip -t DebtPilot-Offline-v1.2.apk >/dev/null
 
-      - name: Verify package, privacy, and Android signature
+      - name: Verify package, permissions, and Android signature
         run: |
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          "$AAPT" dump badging DebtPilot-Offline-v1.1.apk | tee apk-badging.txt
+          "$AAPT" dump badging DebtPilot-Offline-v1.2.apk | tee apk-badging.txt
           grep -q "package: name='com.debtpilot.offline'" apk-badging.txt
-          grep -q "versionCode='2'" apk-badging.txt
-          grep -q "versionName='1.1.0'" apk-badging.txt
-          "$AAPT" dump permissions DebtPilot-Offline-v1.1.apk | tee apk-permissions.txt
+          grep -q "versionCode='3'" apk-badging.txt
+          grep -q "versionName='1.2.0'" apk-badging.txt
+          "$AAPT" dump permissions DebtPilot-Offline-v1.2.apk | tee apk-permissions.txt
           ! grep -q "android.permission.INTERNET" apk-permissions.txt
-          "$APKSIGNER" verify --verbose --print-certs DebtPilot-Offline-v1.1.apk
-          sha256sum DebtPilot-Offline-v1.1.apk | tee DebtPilot-Offline-v1.1.sha256
+          grep -q "android.permission.USE_FULL_SCREEN_INTENT" apk-permissions.txt
+          "$APKSIGNER" verify --verbose --print-certs DebtPilot-Offline-v1.2.apk
+          sha256sum DebtPilot-Offline-v1.2.apk | tee DebtPilot-Offline-v1.2.sha256
 
       - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
-          name: DebtPilot-Offline-v1.1-APK
+          name: DebtPilot-Offline-v1.2-APK
           path: |
-            DebtPilot-Offline-v1.1.apk
-            DebtPilot-Offline-v1.1.sha256
+            DebtPilot-Offline-v1.2.apk
+            DebtPilot-Offline-v1.2.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -102,10 +129,10 @@ jobs:
           target: google_apis
           disable-animations: true
           script: |
-            adb install -r "$GITHUB_WORKSPACE/DebtPilot-Offline-v1.1.apk"
+            adb install -r "$GITHUB_WORKSPACE/DebtPilot-Offline-v1.2.apk"
+            adb shell pm grant com.debtpilot.offline android.permission.POST_NOTIFICATIONS || true
             adb shell am force-stop com.debtpilot.offline
             adb shell am start -W -n com.debtpilot.offline/.MainActivity
             sleep 3
             adb shell pidof com.debtpilot.offline
             adb shell dumpsys activity activities | grep -q "com.debtpilot.offline/.MainActivity"
-
