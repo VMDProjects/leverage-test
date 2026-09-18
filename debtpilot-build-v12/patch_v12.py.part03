@@ -1,0 +1,41 @@
+ finishAlarm(loanId)
+        }
+    }
+
+    private fun startSound() {
+        val value=intent.getStringExtra("soundUri").orEmpty(); val uri=runCatching { if (value.isBlank()) ReminderScheduler.defaultAlarmUri() else Uri.parse(value) }.getOrElse { ReminderScheduler.defaultAlarmUri() }
+        runCatching {
+            player=MediaPlayer().apply {
+                setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                setDataSource(this@AlarmActivity, uri); isLooping=true; prepare(); start()
+            }
+        }
+    }
+    private fun stopSound(){ runCatching { player?.stop() }; player?.release(); player=null }
+    private fun finishAlarm(loanId: Long){ stopSound(); if (loanId!=0L) getSystemService(NotificationManager::class.java).cancel((((loanId % 200_000_000L)*10L)%Int.MAX_VALUE).toInt()); finishAndRemoveTask() }
+}
+''')
+
+# Manifest add full screen and AlarmActivity
+p=root/'app/src/main/AndroidManifest.xml'
+s=p.read_text()
+s=s.replace('<uses-permission android:name="android.permission.VIBRATE" />','<uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />')
+s=s.replace('''        <activity\n            android:name=".MainActivity"''','''        <activity\n            android:name=".AlarmActivity"\n            android:exported="false"\n            android:excludeFromRecents="true"\n            android:showOnLockScreen="true"\n            android:turnScreenOn="true"\n            android:theme="@style/Theme.DebtPilotOffline" />\n\n        <activity\n            android:name=".MainActivity"''')
+p.write_text(s)
+
+# Build version bump
+p=root/'app/build.gradle.kts'
+s=p.read_text().replace('versionCode = 2','versionCode = 3').replace('versionName = "1.1.0"','versionName = "1.2.0"')
+p.write_text(s)
+
+# Final compatibility cleanup and persistence coverage for v1.2
+p=root/'app/src/main/AndroidManifest.xml'
+s=p.read_text().replace('\n            android:showOnLockScreen="true"','').replace('\n            android:turnScreenOn="true"','')
+p.write_text(s)
+
+p=root/'app/src/test/java/com/debtpilot/offline/data/DebtDatabaseTest.kt'
+s=p.read_text()
+if 'perLoanAlarmSettingsPersist' not in s:
+    insert='''\n    @Test fun perLoanAlarmSettingsPersist() {\n        val id = db.saveLoan(\n            Loan(\n                code = "ALARM-001", name = "Alarm Settings", originalAmount = 2500.0, remainingBalance = 2500.0,\n                nextDueDate = JalaliDate(1405, 9, 12), reminderDayOfMonth = 10, repeatMode = RepeatMode.MONTHLY,\n                annualInterestRatePct = 0.0, minimumPayment = 250.0, installmentAmount = 250.0,\n                reminderHour = 18, reminderMinute = 45, alarmSoundUri = "content://settings/system/alarm_alert",\n                fullScreenAlarm = true, vibrateAlarm = false\n            )\n        )\n        val saved = db.getLoan(id)!!\n        assertEquals(18, saved.reminderHour)\n        assertEquals(45, saved.reminderMinute)\n        assertEquals("content://settings/system/alarm_alert", saved.alarmSoundUri)\n        assertTrue(saved.fullScreenAlarm)\n        assertEquals(false, saved.vibrateAlarm)\n    }\n'''
+    s=s.replace('\n    @Test fun customPaymentPersistsAndHistoryIsWritten()', insert+'\n    @Test fun customPaymentPersistsAndHistoryIsWritten()')
+    p.write_text(s)
