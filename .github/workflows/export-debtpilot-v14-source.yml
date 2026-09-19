@@ -1,0 +1,38 @@
+name: Export exact v1.4 CI source
+on:
+  push:
+    branches: [debtpilot-apk-build]
+    paths: ['.github/workflows/export-debtpilot-v14-source.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct original source
+        run: |
+          mkdir -p build-src
+          cat debtpilot-build-v11/source.b64.00 debtpilot-build-v11/source.b64.01 debtpilot-build-v11/source.b64.02a debtpilot-build-v11/source.b64.02b debtpilot-build-v11/source.b64.02c debtpilot-build-v11/source.b64.03 debtpilot-build-v11/source.b64.04 debtpilot-build-v11/source.b64.05 debtpilot-build-v11/source.b64.06 | base64 -d > /tmp/v11.zip
+          echo '326c02a31978c6b49be95d51ee6843527ab670ddaa0e6c781e8104785efdef2e  /tmp/v11.zip' | sha256sum -c -
+          unzip -q /tmp/v11.zip -d build-src
+          cp debtpilot-build-v11/themes.xml build-src/DebtPilotOffline/app/src/main/res/values/themes.xml
+          cat debtpilot-build-v12/patch_v12.py.part* >/tmp/v12_core.py
+          cat debtpilot-build-v12/patch_ui_v12.py.part* >/tmp/v12_ui.py
+          sed -i 's#/mnt/data/debtpilot_v12/DebtPilotOffline#build-src/DebtPilotOffline#g' /tmp/v12_core.py /tmp/v12_ui.py
+          python /tmp/v12_core.py
+          python /tmp/v12_ui.py
+          cat debtpilot-build-v13/patch.b64.0{0,1,2,3} | base64 -d | gunzip >/tmp/v13.patch
+          (cd build-src && patch -p1 --batch < /tmp/v13.patch)
+          cat debtpilot-build-v14/patch.b64.0{0,1,2,3,4} | base64 -d | gunzip >/tmp/v14.patch
+          (cd build-src/DebtPilotOffline && patch -p1 --batch < /tmp/v14.patch)
+          grep -q 'versionName = "1.4.0"' build-src/DebtPilotOffline/app/build.gradle.kts
+          cd build-src && zip -qr "$GITHUB_WORKSPACE/v14-ci-source.zip" DebtPilotOffline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DebtPilot-v14-reconstructed-source
+          path: v14-ci-source.zip
+          if-no-files-found: error
+          retention-days: 7
