@@ -1,0 +1,100 @@
+name: Build DebtPilot APK v1.5
+on:
+  push:
+    branches: [debtpilot-apk-build]
+    paths:
+      - 'debtpilot-build-v15/**'
+      - '.github/workflows/build-debtpilot-v15.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK
+        run: |
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Reconstruct v1.1 source
+        run: |
+          mkdir -p build-src
+          cat debtpilot-build-v11/source.b64.00 debtpilot-build-v11/source.b64.01 debtpilot-build-v11/source.b64.02a debtpilot-build-v11/source.b64.02b debtpilot-build-v11/source.b64.02c debtpilot-build-v11/source.b64.03 debtpilot-build-v11/source.b64.04 debtpilot-build-v11/source.b64.05 debtpilot-build-v11/source.b64.06 | base64 -d > /tmp/v11.zip
+          echo '326c02a31978c6b49be95d51ee6843527ab670ddaa0e6c781e8104785efdef2e  /tmp/v11.zip' | sha256sum -c -
+          unzip -q /tmp/v11.zip -d build-src
+          cp debtpilot-build-v11/themes.xml build-src/DebtPilotOffline/app/src/main/res/values/themes.xml
+      - name: Apply v1.2 verified changes
+        run: |
+          cat debtpilot-build-v12/patch_v12.py.part* >/tmp/v12_core.py
+          cat debtpilot-build-v12/patch_ui_v12.py.part* >/tmp/v12_ui.py
+          echo 'e298ba65faa5dc0d4a4281766808fbf98449d9dac3628796bacb0be065d19188  /tmp/v12_core.py' | sha256sum -c -
+          echo 'ebffd634332e953f0e02721241d24726eebc1deb4c8e598140070ece32c1e6cf  /tmp/v12_ui.py' | sha256sum -c -
+          sed -i 's#/mnt/data/debtpilot_v12/DebtPilotOffline#build-src/DebtPilotOffline#g' /tmp/v12_core.py /tmp/v12_ui.py
+          python /tmp/v12_core.py
+          python /tmp/v12_ui.py
+          echo 'f01390ae5d0202c35265f43608103cd405268be79e365ca0b4773f2dc8747aee  build-src/DebtPilotOffline/app/src/main/java/com/debtpilot/offline/ui/DebtPilotApp.kt' | sha256sum -c -
+      - name: Apply v1.3 verified changes
+        run: |
+          cat debtpilot-build-v13/patch.b64.0{0,1,2,3} | base64 -d >/tmp/v13.patch.gz
+          echo '176c49727e64fd0a55dd29d73dba1d2b2d333f9f91f674d4424cba19c1cd0b28  /tmp/v13.patch.gz' | sha256sum -c -
+          gunzip -c /tmp/v13.patch.gz >/tmp/v13.patch
+          (cd build-src && patch -p1 --batch </tmp/v13.patch)
+      - name: Apply v1.4 verified changes
+        run: |
+          cat debtpilot-build-v14/patch.b64.0{0,1,2,3,4} | base64 -d | gunzip >/tmp/v14.patch
+          echo '7001ebd53f6c87081758d2eecc9c8d35ca223fac3442c39ca7b5e2fb29662b8b  /tmp/v14.patch' | sha256sum -c -
+          (cd build-src/DebtPilotOffline && patch -p1 --batch </tmp/v14.patch)
+      - name: Apply v1.5 verified Gregorian patch
+        run: |
+          cat debtpilot-build-v15/patch.b64.0{0,1,2,3,4} | base64 -d | gunzip >/tmp/v15.patch
+          echo '29d03fc5ad6b19920580847388b76e405d28f29011cfaa91d04ee441cf1ec559  /tmp/v15.patch' | sha256sum -c -
+          (cd build-src/DebtPilotOffline && patch -p1 --batch </tmp/v15.patch)
+          grep -q 'versionName = "1.5.0"' build-src/DebtPilotOffline/app/build.gradle.kts
+      - name: Offline and alarm permission checks
+        run: |
+          F=build-src/DebtPilotOffline/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.INTERNET' "$F"
+          grep -q 'android.permission.SCHEDULE_EXACT_ALARM' "$F"
+          grep -q 'android.permission.USE_FULL_SCREEN_INTENT' "$F"
+      - name: Finance and Gregorian recurrence unit tests
+        working-directory: build-src/DebtPilotOffline
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Android lint
+        working-directory: build-src/DebtPilotOffline
+        run: gradle --no-daemon lintDebug
+      - name: Compile installable APK
+        working-directory: build-src/DebtPilotOffline
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK, version, signature and privacy
+        run: |
+          cp build-src/DebtPilotOffline/app/build/outputs/apk/debug/app-debug.apk DebtPilot-Offline-v1.5.apk
+          test -s DebtPilot-Offline-v1.5.apk
+          unzip -t DebtPilot-Offline-v1.5.apk >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging DebtPilot-Offline-v1.5.apk | tee badging.txt
+          grep -q "package: name='com.debtpilot.offline'" badging.txt
+          grep -q "versionCode='6'" badging.txt
+          grep -q "versionName='1.5.0'" badging.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump permissions DebtPilot-Offline-v1.5.apk | tee permissions.txt
+          ! grep -q 'android.permission.INTERNET' permissions.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs DebtPilot-Offline-v1.5.apk
+          sha256sum DebtPilot-Offline-v1.5.apk > DebtPilot-Offline-v1.5.sha256
+      - name: Upload final installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DebtPilot-Offline-v1.5-APK
+          path: |
+            DebtPilot-Offline-v1.5.apk
+            DebtPilot-Offline-v1.5.sha256
+          if-no-files-found: error
+          retention-days: 30
